@@ -1,0 +1,15 @@
+docker-mysql/*
+.DS_Store
+.idea
+.env
+docker/nginx/certs/mkcert/*
+docker/nginx/certs/selfsigned/*
+certbot
+certbot/*
+nginx-logs
+nginx-logs/*
+supervisor-logs/*
+minio_storage
+minio_storage/*
+beanstalkd_data
+beanstalkd_data/*

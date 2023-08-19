@@ -1,0 +1,21 @@
+# .dockerignore
+
+./src/*/.vscode
+
+./src/*/node_modules
+./src/*/vendor
+./src/*/.svelte-kit
+./src/*/build
+
+.git
+.gitattributes
+./src/*/.git
+./src/*/.gitattributes
+
+.env
+./src/*/.env
+
+./app/node_modules
+
+./certbot/*
+./nginx-logs/*

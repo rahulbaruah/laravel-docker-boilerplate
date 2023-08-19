@@ -1,0 +1,8 @@
+# https://laravel-for-newbie.kejyun.com/en/advanced/scheduling/docker/
+# laravel_docker_crontab
+# m h  dom mon dow   command
+# use the bin/bash as the default environment
+* * * * * cd /var/www/html/laravel-app && php artisan schedule:run >> /dev/null 2>&1
+
+# If your docker doesn't use the bin/bash as the default environment
+# * * * * * /bin/bash -l -c 'cd /my/laravel/app/ && php artisan schedule:run >> /dev/null 2>&1'

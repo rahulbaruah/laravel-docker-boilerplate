@@ -1,0 +1,306 @@
+ARG NGINX_VERSION="1.24.0"
+
+FROM nginx:${NGINX_VERSION}-alpine as build
+
+ARG MODSEC_VERSION=3.0.9
+
+# Note: pcre-dev (PCRE 1) is required by the build description,
+# even though the build will use PCRE2.
+RUN set -eux; \
+    apk add --no-cache --virtual .build-deps \
+        autoconf \
+        automake \
+        ca-certificates \
+        coreutils \
+        curl-dev \
+        g++ \
+        gcc \
+        geoip-dev \
+        git \
+        libc-dev \
+        libfuzzy2-dev \
+        libmaxminddb-dev \
+        libstdc++ \
+        libtool \
+        libxml2-dev \
+        linux-headers \
+        lmdb-dev \
+        make \
+        openssl \
+        openssl-dev \
+        patch \
+        pkgconfig \
+        pcre-dev \
+        pcre2-dev \
+        yajl-dev \
+        zlib-dev
+
+WORKDIR /sources
+
+RUN set -eux; \
+    git clone https://github.com/SpiderLabs/ModSecurity --branch v"${MODSEC_VERSION}" --depth 1 --recursive; \
+    cd ModSecurity; \
+    ARCH=$(gcc -print-multiarch); \
+    sed -ie "s/i386-linux-gnu/${ARCH}/g" build/ssdeep.m4; \
+    sed -ie "s/i386-linux-gnu/${ARCH}/g" build/pcre2.m4; \
+    ./build.sh; \
+    ./configure --with-yajl --with-ssdeep --with-lmdb --with-geoip --with-pcre2 --enable-silent-rules; \
+    make install; \
+    strip /usr/local/modsecurity/lib/lib*.so*
+
+# We use master
+RUN set -eux; \
+    git clone -b master --depth 1 https://github.com/SpiderLabs/ModSecurity-nginx.git; \
+    wget --quiet http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz; \
+    tar -xzf nginx-${NGINX_VERSION}.tar.gz; \
+    cd ./nginx-${NGINX_VERSION}; \
+    ./configure --with-compat --add-dynamic-module=../ModSecurity-nginx; \
+    make modules; \
+    cp objs/ngx_http_modsecurity_module.so /etc/nginx/modules/; \
+    mkdir /etc/modsecurity.d; \
+    wget --quiet https://raw.githubusercontent.com/SpiderLabs/ModSecurity/v3/master/modsecurity.conf-recommended \
+        -O /etc/modsecurity.d/modsecurity.conf; \
+    wget --quiet https://raw.githubusercontent.com/SpiderLabs/ModSecurity/v3/master/unicode.mapping \
+        -O /etc/modsecurity.d/unicode.mapping
+
+# Generate/Download Diffie-Hellman parameter files
+RUN set -eux; \
+    mkdir -p /usr/share/TLS; \
+    curl -sSL https://ssl-config.mozilla.org/ffdhe2048.txt -o /usr/share/TLS/dhparam-2048.pem; \
+    curl -sSL https://ssl-config.mozilla.org/ffdhe4096.txt -o /usr/share/TLS/dhparam-4096.pem
+
+FROM nginx:${NGINX_VERSION}-alpine as crs_release
+
+# https://github.com/coreruleset/coreruleset
+ARG CRS_RELEASE='3.3.5'
+
+# hadolint ignore=DL3008,SC2016
+RUN set -eux; \
+    apk add --no-cache \
+    ca-certificates \
+    curl \
+    gnupg; \
+    mkdir /opt/owasp-crs; \
+    curl -SL https://github.com/coreruleset/coreruleset/archive/v${CRS_RELEASE}.tar.gz -o v${CRS_RELEASE}.tar.gz; \
+    curl -SL https://github.com/coreruleset/coreruleset/releases/download/v${CRS_RELEASE}/coreruleset-${CRS_RELEASE}.tar.gz.asc -o coreruleset-${CRS_RELEASE}.tar.gz.asc; \
+    gpg --fetch-key https://coreruleset.org/security.asc; \
+    gpg --verify coreruleset-${CRS_RELEASE}.tar.gz.asc v${CRS_RELEASE}.tar.gz; \
+    tar -zxf v${CRS_RELEASE}.tar.gz --strip-components=1 -C /opt/owasp-crs; \
+    rm -f v${CRS_RELEASE}.tar.gz coreruleset-${CRS_RELEASE}.tar.gz.asc; \
+    mv -v /opt/owasp-crs/crs-setup.conf.example /opt/owasp-crs/crs-setup.conf
+
+FROM nginx:${NGINX_VERSION}-alpine AS brotli-builder
+
+WORKDIR /root/
+
+RUN apk add --update --no-cache build-base git pcre-dev openssl-dev zlib-dev linux-headers \
+    && wget http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz \
+    && tar zxf nginx-${NGINX_VERSION}.tar.gz \
+    && git clone https://github.com/google/ngx_brotli.git \
+    && cd ngx_brotli \
+    && git submodule update --init --recursive \
+    && cd ../nginx-${NGINX_VERSION} \
+    && ./configure \
+    --add-dynamic-module=../ngx_brotli \
+    --prefix=/etc/nginx \
+    --sbin-path=/usr/sbin/nginx \
+    --modules-path=/usr/lib/nginx/modules \
+    --conf-path=/etc/nginx/nginx.conf \
+    --error-log-path=/var/log/nginx/error.log \
+    --http-log-path=/var/log/nginx/access.log \
+    --pid-path=/var/run/nginx.pid \
+    --lock-path=/var/run/nginx.lock \
+    --http-client-body-temp-path=/var/cache/nginx/client_temp \
+    --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
+    --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
+    --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
+    --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
+    --with-perl_modules_path=/usr/lib/perl5/vendor_perl \
+    --user=nginx \
+    --group=nginx \
+    --with-compat \
+    --with-file-aio \
+    --with-threads \
+    --with-http_addition_module \
+    --with-http_auth_request_module \
+    --with-http_dav_module \
+    --with-http_flv_module \
+    --with-http_gunzip_module \
+    --with-http_gzip_static_module \
+    --with-http_mp4_module \
+    --with-http_random_index_module \
+    --with-http_realip_module \
+    --with-http_secure_link_module \
+    --with-http_slice_module \
+    --with-http_ssl_module \
+    --with-http_stub_status_module \
+    --with-http_sub_module \
+    --with-http_v2_module \
+    --with-mail \
+    --with-mail_ssl_module \
+    --with-stream \
+    --with-stream_realip_module \
+    --with-stream_ssl_module \
+    --with-stream_ssl_preread_module \
+    --with-cc-opt='-Os -fomit-frame-pointer -g' \
+    --with-ld-opt=-Wl,--as-needed,-O1,--sort-common \
+    && make modules
+
+FROM nginx:${NGINX_VERSION}-alpine
+
+ENV TIME_ZONE=Asia/Kolkata
+
+# install necessary alpine packages
+RUN apk update
+
+ARG MODSEC_VERSION=3.0.9
+
+LABEL maintainer="Rahul Baruah <baruah.rahul.88@gmail.com>"
+
+ENV ACCESSLOG=/var/log/nginx/access.log \
+    BACKEND=http://localhost:80 \
+    DNS_SERVER='127.0.0.11' \
+    ERRORLOG=/var/log/nginx/error.log \
+    LOGLEVEL=warn \
+    METRICS_ALLOW_FROM='127.0.0.0/24' \
+    METRICS_DENY_FROM='all' \
+    METRICSLOG=/dev/null \
+    MODSEC_AUDIT_ENGINE="RelevantOnly" \
+    MODSEC_AUDIT_LOG_FORMAT=JSON \
+    MODSEC_AUDIT_LOG_TYPE=Serial \
+    MODSEC_AUDIT_LOG=/dev/stdout \
+    MODSEC_AUDIT_LOG_PARTS='ABIJDEFHZ' \
+    MODSEC_AUDIT_STORAGE=/var/log/modsecurity/audit/ \
+    MODSEC_DATA_DIR=/tmp/modsecurity/data \
+    MODSEC_DEBUG_LOG=/dev/null \
+    MODSEC_DEBUG_LOGLEVEL=0 \
+    MODSEC_DEFAULT_PHASE1_ACTION="phase:1,pass,log,tag:'\${MODSEC_TAG}'" \
+    MODSEC_DEFAULT_PHASE2_ACTION="phase:2,pass,log,tag:'\${MODSEC_TAG}'" \
+    MODSEC_PCRE_MATCH_LIMIT_RECURSION=100000 \
+    MODSEC_PCRE_MATCH_LIMIT=100000 \
+    MODSEC_REQ_BODY_ACCESS=on \
+    MODSEC_REQ_BODY_LIMIT=13107200 \
+    MODSEC_REQ_BODY_LIMIT_ACTION="Reject" \
+    MODSEC_REQ_BODY_JSON_DEPTH_LIMIT=512 \
+    MODSEC_REQ_BODY_NOFILES_LIMIT=131072 \
+    MODSEC_RESP_BODY_ACCESS=on \
+    MODSEC_RESP_BODY_LIMIT=1048576 \
+    MODSEC_RESP_BODY_LIMIT_ACTION="ProcessPartial" \
+    MODSEC_RESP_BODY_MIMETYPE="text/plain text/html text/xml" \
+    MODSEC_RULE_ENGINE=on \
+    MODSEC_STATUS_ENGINE="Off" \
+    MODSEC_TAG=modsecurity \
+    MODSEC_TMP_DIR=/tmp/modsecurity/tmp \
+    MODSEC_TMP_SAVE_UPLOADED_FILES="on" \
+    MODSEC_UPLOAD_DIR=/tmp/modsecurity/upload \
+    PORT=80 \
+    NGINX_ALWAYS_TLS_REDIRECT=off \
+    SET_REAL_IP_FROM="127.0.0.1" \
+    REAL_IP_HEADER="X-REAL-IP" \
+    REAL_IP_PROXY_HEADER="X-REAL-IP" \
+    REAL_IP_RECURSIVE="on" \
+    PROXY_TIMEOUT=60s \
+    PROXY_SSL_CERT=/etc/nginx/conf/server.crt \
+    PROXY_SSL_CERT_KEY=/etc/nginx/conf/server.key \
+    PROXY_SSL_DH_BITS=2048 \
+    PROXY_SSL_PROTOCOLS="TLSv1.2 TLSv1.3" \
+    PROXY_SSL_CIPHERS="ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384" \
+    PROXY_SSL_PREFER_CIPHERS=off \
+    PROXY_SSL_VERIFY=off \
+    PROXY_SSL_OCSP_STAPLING=off \
+    SERVER_NAME=localhost \
+    SSL_PORT=443 \
+    TIMEOUT=60s \
+    WORKER_CONNECTIONS=1024 \
+    LD_LIBRARY_PATH=/lib:/usr/lib:/usr/local/lib \
+    NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx \
+    # overridden variables
+    USER=nginx \
+    # CRS specific variables
+    PARANOIA=1 \
+    ANOMALY_INBOUND=5 \
+    ANOMALY_OUTBOUND=4 \
+    BLOCKING_PARANOIA=1
+
+RUN ln -snf /usr/share/zoneinfo/$TIME_ZONE /etc/localtime && echo $TIME_ZONE > /etc/timezone
+
+COPY --from=brotli-builder /root/nginx-${NGINX_VERSION}/objs/ngx_http_brotli_filter_module.so /usr/lib/nginx/modules/
+COPY --from=brotli-builder /root/nginx-${NGINX_VERSION}/objs/ngx_http_brotli_static_module.so /usr/lib/nginx/modules/
+
+COPY --from=build /usr/local/modsecurity/lib/libmodsecurity.so.${MODSEC_VERSION} /usr/local/modsecurity/lib/
+COPY --from=build /etc/nginx/modules/ngx_http_modsecurity_module.so /etc/nginx/modules/ngx_http_modsecurity_module.so
+COPY --from=build /usr/share/TLS/dhparam-* /etc/ssl/certs/
+COPY --from=build /etc/modsecurity.d/unicode.mapping /etc/modsecurity.d/unicode.mapping
+COPY --from=build /etc/modsecurity.d/modsecurity.conf /etc/modsecurity.d/modsecurity.conf
+COPY --from=crs_release /opt/owasp-crs /opt/owasp-crs
+# We use the templating mechanism from the nginx image here,
+# as set up by owasp/modsecurity-docker
+COPY nginx/templates /etc/nginx/templates/
+COPY src/etc/modsecurity.d/modsecurity-override.conf /etc/nginx/templates/modsecurity.d/modsecurity-override.conf.template
+COPY src/etc/modsecurity.d/setup.conf /etc/nginx/templates/modsecurity.d/setup.conf.template
+COPY src/bin/* /usr/local/bin/
+COPY nginx/docker-entrypoint.d/*.sh /docker-entrypoint.d/
+COPY src/opt/modsecurity/activate-plugins.sh /docker-entrypoint.d/94-activate-plugins.sh
+COPY src/opt/modsecurity/activate-rules.sh /docker-entrypoint.d/95-activate-rules.sh
+
+
+RUN set -eux; \
+    apk add --no-cache \
+        curl \
+        curl-dev \
+        libfuzzy2 \
+        libmaxminddb-dev \
+        libstdc++ \
+        libxml2-dev \
+        lmdb-dev \
+        moreutils \
+        openssl \
+        tzdata \
+        pcre \
+        pcre2 \
+        # Alpine needs GNU 'sed' because the 'sed' program shipped with busybox does not support 'z' parameter for separating lines with a 'NUL' character.
+        sed \
+        yajl; \
+    mkdir /etc/nginx/ssl/; \
+    mkdir -p /tmp/modsecurity/data; \
+    mkdir -p /tmp/modsecurity/upload; \
+    mkdir -p /tmp/modsecurity/tmp; \
+    chown -R nginx:nginx /usr/share/nginx /tmp/modsecurity; \
+    # Comment out the SecDisableBackendCompression option since it is not supported in V3
+    sed -i 's/^\(SecDisableBackendCompression .*\)/# \1/' /etc/nginx/templates/modsecurity.d/modsecurity-override.conf.template; \
+    ln -s /usr/local/modsecurity/lib/libmodsecurity.so.${MODSEC_VERSION} /usr/local/modsecurity/lib/libmodsecurity.so.3.0; \
+    ln -s /usr/local/modsecurity/lib/libmodsecurity.so.${MODSEC_VERSION} /usr/local/modsecurity/lib/libmodsecurity.so.3; \
+    ln -s /usr/local/modsecurity/lib/libmodsecurity.so.${MODSEC_VERSION} /usr/local/modsecurity/lib/libmodsecurity.so; \
+    ln -sv /opt/owasp-crs /etc/modsecurity.d/; \
+    chgrp -R 0 /var/cache/nginx/ /var/log/ /var/run/ /usr/share/nginx/ /etc/nginx/ /etc/modsecurity.d/; \
+    chmod -R g=u /var/cache/nginx/ /var/log/ /var/run/ /usr/share/nginx/ /etc/nginx/ /etc/modsecurity.d/
+
+
+RUN chmod -R +x /docker-entrypoint.d /usr/local/bin/generate-certificate
+
+WORKDIR /usr/share/nginx/html
+
+HEALTHCHECK CMD /usr/local/bin/healthcheck
+
+# environment arguments
+ARG UID
+ARG GID
+ARG DOCKER_USER
+ARG DOCKER_GROUP
+
+ENV UID=${UID}
+ENV GID=${GID}
+ENV DOCKER_USER=${DOCKER_USER}
+ENV DOCKER_GROUP=${DOCKER_GROUP}
+
+# Dialout group in alpine linux conflicts with MacOS staff group's gid, whis is 20. So we remove it.
+RUN delgroup dialout
+
+# Creating user and group
+RUN addgroup -g ${GID} --system ${DOCKER_GROUP}
+RUN adduser -G ${DOCKER_GROUP} --system -D -s /bin/sh -u ${UID} ${DOCKER_USER}
+
+# Modify nginx configuration to use the new user's priviledges for starting it.
+RUN sed -i "s/user nginx/user '${DOCKER_USER}'/g" /etc/nginx/nginx.conf
+
+COPY nginx/conf.d/*.conf /etc/nginx/conf.d/

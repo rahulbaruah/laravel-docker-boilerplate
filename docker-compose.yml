@@ -1,0 +1,405 @@
+version: "3.9"
+
+networks:
+  laravel:
+    driver: bridge
+
+volumes:
+  minio_storage: {}
+  beanstalkd_data:
+
+services:
+  php:
+    build:
+      context: ./
+      dockerfile: ./docker/php.dockerfile
+      args:
+        - UID=${UID:-1000}
+        - GID=${GID:-1000}
+        - DOCKER_USER=${DOCKER_USER:-laravel}
+        - DOCKER_GROUP=${DOCKER_GROUP:-laravel}
+    environment:
+      PHP_FPM_USER: ${DOCKER_USER:-laravel}
+      PHP_FPM_GROUP: ${DOCKER_GROUP:-laravel}
+    container_name: php
+    restart: unless-stopped
+    tty: true
+    volumes:
+      - ./src:/var/www/html
+    env_file:
+      - ./.env
+    depends_on:
+      - mysql
+      - beanstalkd
+      - supervisor
+      - cronjob
+      - nginx-modsecurity
+    # ports:
+    #   - 9000:9000
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    # environment:
+    #   XDEBUG_ENABLED: 1
+    #   XDEBUG_REMOTE_AUTOSTART: 1
+    #   XDEBUG_MAXNESTING_LEVEL: 1000
+    #   XDEBUG_REMOTE_CONNECT_BACK: 1
+    #   XDEBUG_REMOTE_HOST: 172.17.0.1
+    #   XDEBUG_MODE: '${SAIL_XDEBUG_MODE:-off}'
+    #   XDEBUG_CONFIG: '${SAIL_XDEBUG_CONFIG:-client_host=host.docker.internal}'
+    networks:
+      - laravel
+
+  nginx:
+    build:
+      context: ./
+      dockerfile: ./docker/nginx-modsecurity.dockerfile
+      args:
+        - UID=${UID:-1000}
+        - GID=${GID:-1000}
+        - DOCKER_USER=${DOCKER_USER:-laravel}
+        - DOCKER_GROUP=${DOCKER_GROUP:-laravel}
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "0.1"
+    #       memory: 50M
+    #   restart_policy:
+    #     condition: on-failure
+    restart: unless-stopped
+    tty: true
+    container_name: nginx
+    # depends_on:
+    #   - php
+    #   - mysql
+    #   - beanstalkd
+    #   - supervisor
+    #   - cronjob
+    volumes:
+      - ./src:/var/www/html:ro
+      - ./nginx-logs:/var/log/nginx
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf/:/etc/letsencrypt:ro
+    environment:
+      - PROXY=1
+    ports:
+      - "8080:80"
+      # - 1443:443
+    networks:
+      - laravel
+
+  nginx-modsecurity:
+    build:
+      context: ./docker/modsecurity-crs-docker-master
+      dockerfile: nginx/Dockerfile-alpine
+      args:
+        - UID=${UID:-1000}
+        - GID=${GID:-1000}
+        - DOCKER_USER=${DOCKER_USER:-laravel}
+        - DOCKER_GROUP=${DOCKER_GROUP:-laravel}
+    restart: unless-stopped
+    tty: true
+    container_name: nginx-modsecurity
+    volumes:
+      - ./src:/var/www/html:ro
+      - ./nginx-logs:/var/log/nginx
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf/:/etc/letsencrypt:ro
+      - ./docker/modsecurity-crs-docker-master/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf
+      - ./docker/modsecurity-crs-docker-master/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf
+    environment:
+      - SERVERNAME=localhost
+
+      #############################################
+      # CRS Variables
+      #############################################
+      # Paranoia Level
+      - PARANOIA=1
+      # Replaces PARANOIA as of CRS 4
+      - BLOCKING_PARANOIA=1
+      # Inbound and Outbound Anomaly Score Threshold
+      - ANOMALY_INBOUND=5
+      - ANOMALY_OUTBOUND=4
+      # Executing Paranoia Level
+      # - EXECUTING_PARANOIA=2
+      #
+      # Replaces EXECUTING_PARANOIA as of CRS 4
+      # - DETECTION_PARANOIA=2
+      #
+      # New in CRS 4
+      - REPORTING_LEVEL=2
+
+      #######################################################
+      # Reverse Proxy mode
+      # (only available if SETPROXY was enabled during the
+      # parent ModSecurity image)
+      #######################################################
+      # PROXYLOCATION: Application Backend of Reverse Proxy
+      # - PROXYLOCATION=http://app:8000/
+      #
+      # If needed: add own httpd-proxy.conf (only available if SETPROXY
+      # was enabled during build of parent ModSecurity image)
+      #  - ./httpd-proxy.conf:/usr/local/apache2/conf/extra/httpd-proxy.conf
+
+      #######################################################
+      # Various CRS Variables with Default Values
+      #######################################################
+      #- ENFORCE_BODYPROC_URLENCODED=1
+      #- ALLOWED_METHODS=GET HEAD POST OPTIONS
+      #- ALLOWED_REQUEST_CONTENT_TYPE='|application/x-www-form-urlencoded| |multipart/form-data| |multipart/related| |text/xml| |application/xml| |application/soap+xml| |application/json| |application/cloudevents+json| |application/cloudevents-batch+json|'
+      #- ALLOWED_REQUEST_CONTENT_TYPE_CHARSET='utf-8|iso-8859-1|iso-8859-15|windows-1252'
+      #- ALLOWED_HTTP_VERSIONS=HTTP/1.0 HTTP/1.1 HTTP/2 HTTP/2.0
+      #- RESTRICTED_EXTENSIONS=.asa/ .asax/ .ascx/ .axd/ .backup/ .bak/ .bat/ .cdx/ .cer/ .cfg/ .cmd/ .com/ .config/ .conf/ .cs/ .csproj/ .csr/ .dat/ .db/ .dbf/ .dll/ .dos/ .htr/ .htw/ .ida/ .idc/ .idq/ .inc/ .ini/ .key/ .licx/ .lnk/ .log/ .mdb/ .old/ .pass/ .pdb/ .pol/ .printer/ .pwd/ .rdb/ .resources/ .resx/ .sql/ .swp/ .sys/ .vb/ .vbs/ .vbproj/ .vsdisco/ .webinfo/ .xsd/ .xsx/
+      #- RESTRICTED_HEADERS=/accept-charset/ /content-encoding/ /proxy/ /lock-token/ /content-range/ /if/
+      #- STATIC_EXTENSIONS=/.jpg/ /.jpeg/ /.png/ /.gif/ /.js/ /.css/ /.ico/ /.svg/ /.webp/
+
+      #######################################################
+      # CRS Variables with Default Value unlimited
+      #######################################################
+      #- MAX_NUM_ARGS=255
+      #- ARG_NAME_LENGTH=100
+      #- ARG_LENGTH=400
+      #- TOTAL_ARG_LENGTH=64000
+      #- MAX_FILE_SIZE=1048576
+      #- COMBINED_FILE_SIZES=1048576
+    ports:
+      - "8080:80"
+      # - 1443:443
+    networks:
+      - laravel
+
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - ./certbot/www/:/var/www/certbot
+      - ./certbot/conf/:/etc/letsencrypt
+
+  mysql:
+    image: "mariadb:10.9.4"
+    container_name: mysql
+    restart: unless-stopped
+    tty: true
+    working_dir: /var/www/html
+    volumes:
+      - ./docker-mysql:/var/lib/mysql
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      SERVICE_TAGS: dev
+      SERVICE_NAME: mysql
+    ports:
+      - "3307:3306"
+    networks:
+      - laravel
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: phpmyadmin
+    restart: always
+    depends_on:
+      - php
+      - mysql
+    ports:
+      - 8081:80
+    environment:
+      PMA_ARBITRARY: 1
+      PMA_HOST: ${DB_HOST}
+      PMA_USER: ${DB_USERNAME}
+      PMA_PASSWORD: ${DB_PASSWORD}
+    networks:
+      - laravel
+
+  # composer:
+  #   build:
+  #     context: ./
+  #     dockerfile: ./docker/composer.dockerfile
+  #     args:
+  #       - UID=${UID:-1000}
+  #       - GID=${GID:-1000}
+  #       - DOCKER_USER=${DOCKER_USER:-laravel}
+  #       - DOCKER_GROUP=${DOCKER_GROUP:-laravel}
+  #   container_name: composer
+  #   volumes:
+  #     - ./src:/var/www/html
+  #   working_dir: /var/www/html
+  #   user: ${DOCKER_USER:-laravel}
+  #   profiles: ["composer"]
+  #   entrypoint: ["composer", "--ignore-platform-reqs"]
+  #   networks:
+  #     - laravel
+
+  # artisan:
+  #   build:
+  #     context: ./
+  #     dockerfile: ./docker/php.dockerfile
+  #     args:
+  #       - UID=${UID:-1000}
+  #       - GID=${GID:-1000}
+  #       - DOCKER_USER=${DOCKER_USER:-laravel}
+  #       - DOCKER_GROUP=${DOCKER_GROUP:-laravel}
+  #   container_name: artisan
+  #   volumes:
+  #     - ./src:/var/www/html
+  #   working_dir: /var/www/html
+  #   entrypoint: ["php", "artisan"]
+  #   networks:
+  #     - laravel
+
+  # npm:
+  #   build:
+  #     context: ./
+  #     dockerfile: ./docker/node.dockerfile
+  #     args:
+  #       - UID=${UID:-1000}
+  #       - GID=${GID:-1000}
+  #       - DOCKER_USER=${DOCKER_USER:-laravel}
+  #       - DOCKER_GROUP=${DOCKER_GROUP:-laravel}
+  #   container_name: npm
+  #   volumes:
+  #     - ./src:/var/www/html
+  #   environment:
+  #     - NODE_ENV=development
+  #   ports:
+  #     - 5173:5173
+  #   # working_dir: /var/www/html
+  #   # profiles: ["npm"]
+  #   # entrypoint: ["npm"]
+  #   networks:
+  #     - laravel
+
+  # redis:
+  #   image: redis:alpine
+  #   container_name: redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - 6380:6379
+  #   networks:
+  #     - laravel
+
+  # mailpit:
+  #   image: axllent/mailpit
+  #   container_name: mailPit
+  #   ports:
+  #     - "1025:1025"
+  #     - "8025:8025"
+  #   networks:
+  #     - laravel
+
+  meilisearch:
+    image: "getmeili/meilisearch:latest"
+    ports:
+      - "${FORWARD_MEILISEARCH_PORT:-7700}:7700"
+    volumes:
+      - ./src:/var/www/html:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--spider",
+          "http://localhost:7700/health",
+        ]
+      retries: 3
+      timeout: 5s
+    networks:
+      - laravel
+
+  # minio:
+  #   hostname: minio
+  #   image: minio/minio
+  #   ports:
+  #     - "9005:9005"
+  #     - "9006:9006"
+  #   volumes:
+  #     - ./minio_storage:/data
+  #   environment:
+  #     MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+  #     MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+  #     interval: 30s
+  #     timeout: 20s
+  #     retries: 3
+  #   command: server --address ":9005" --console-address ":9006" /data
+  #   networks:
+  #     - laravel
+
+  # createbuckets:
+  #   image: minio/mc
+  #   depends_on:
+  #     - minio
+  #   entrypoint: >
+  #     /bin/sh -c "
+  #     /usr/bin/mc alias set myminio http://minio:9005 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
+  #     /usr/bin/mc mb myminio/$${MINIO_BUCKET};
+  #     /usr/bin/mc policy set public myminio/$${MINIO_BUCKET};
+  #     exit 0;
+  #     "
+  #   networks:
+  #     - laravel
+
+  # scheduler:
+  #   build:
+  #     context: ./
+  #     dockerfile: ./docker/php.dockerfile
+  #     args:
+  #       - UID=${UID:-1000}
+  #       - GID=${GID:-1000}
+  #       - DOCKER_USER=${DOCKER_USER:-laravel}
+  #       - DOCKER_GROUP=${DOCKER_GROUP:-laravel}
+  #   container_name: scheduler
+  #   volumes:
+  #     - ./src:/var/www/html
+  #   working_dir: /var/www/html/laravel-app
+  #   entrypoint: ["php", "artisan", "schedule:work"]
+  #   networks:
+  #     - laravel
+
+  supervisor:
+    build:
+      context: ./
+      dockerfile: ./docker/supervisor.dockerfile
+    container_name: supervisor
+    volumes:
+      - ./src:/var/www/html
+      - ./supervisor-logs:/etc/supervisor/logs
+    networks:
+      - laravel
+
+  cronjob:
+    container_name: laravel_cronjob
+    build:
+      context: ./
+      dockerfile: ./docker/laravel.cron.dockerfile
+    image: laravel_cronjob:v1.0
+    volumes:
+      - ./src:/var/www/html
+    restart: always
+
+  beanstalkd:
+    build:
+      context: ./
+      dockerfile: ./docker/beanstalkd.dockerfile
+    container_name: beanstalkd
+    volumes:
+      - ./beanstalkd_data:/var/lib/beanstald
+    # ports:
+    #   - "11300:11300"
+    networks:
+      - laravel
+
+  beanstalkd-web:
+    image: agaveapi/beanstalkd-console
+    # build:
+    #   context: ./
+    #   dockerfile: ./docker/beanstalkd-web/Dockerfile
+    ports:
+      - 8082:80
+    environment:
+      - BEANSTALKD_HOST=beanstalkd
+    depends_on:
+      - beanstalkd
+    networks:
+      - laravel
